@@ -18,7 +18,7 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from crawl4ai import AsyncWebCrawler
 
 st.set_page_config(page_title="FakeGPT", layout="wide")
-Settings.llm = Ollama(model="gemini-3-flash-preview", request_timeout=300.0)
+Settings.llm = Ollama(model="gemini-3-flash-preview", base_url="https://ollama-haproxy.dsv.su.se/", request_timeout=300.0)
 Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
 
 if not os.path.exists("./data"):
@@ -342,7 +342,7 @@ if prompt := st.chat_input("Ask anything..."):
                     if src:
                         unique_sources.add((src, score))
                 for src, score in sorted(unique_sources, key=lambda x: x[1], reverse=True):
-                    st.write(f"- [{src}]({src}) *(Relevance Score: {score:.2f})*")
+                    st.write(f"- [{src}]({src}) *(Cosine similarity: {score:.2f})*")
 
         if developer_mode:
             if agent_result["mode"] == "rag":
