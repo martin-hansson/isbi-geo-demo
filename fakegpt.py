@@ -10,9 +10,11 @@ import requests
 import xml.etree.ElementTree as ET
 import re
 import os
+import shutil
 
-from llama_index.core import VectorStoreIndex, Document, Settings
+from llama_index.core import VectorStoreIndex, Document, Settings, StorageContext, load_index_from_storage
 from llama_index.core.postprocessor import SimilarityPostprocessor
+from llama_index.core.node_parser import MarkdownNodeParser
 from llama_index.llms.ollama import Ollama
 from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from crawl4ai import AsyncWebCrawler
@@ -69,18 +71,46 @@ def load_data_folder():
 
 
 def initialize_engine(docs):
-    """Builds the vector index and initializes the chat engine."""
-    st.session_state.index = VectorStoreIndex.from_documents(docs)
+    """Builds the vector index, saves it to disk, and initializes the chat engine."""
+    
+    parser = MarkdownNodeParser()
+    nodes = parser.get_nodes_from_documents(docs)
+    st.session_state.index = VectorStoreIndex(nodes)
+    
+    st.session_state.index.storage_context.persist(persist_dir="./storage")
     
     system_prompt = (
-        "You are an AI Web Search Assistant. You answer questions naturally, incorporating information "
-        "from retrieved web pages only when that context is clearly relevant.\n\n"
-        "RULES:\n"
-        "1. Answer naturally and directly. Do NOT start with phrases like 'According to the provided context'.\n"
-        "2. For conversational or general-knowledge questions, answer directly from internal knowledge.\n"
-        "3. Use retrieved context only when it is clearly relevant to the user question.\n"
-        "4. If retrieved context is weak/irrelevant, ignore it and answer normally.\n"
-        "5. CITATIONS: Only when you actually use context, include inline URL citations like [https://example.com/...]."
+        "You are a highly capable AI assistant, designed to be helpful, harmless, and honest. "
+        "You provide structured, highly readable answers using Markdown formatting (bolding, lists, etc.).\n\n"
+        "CORE DIRECTIVES:\n"
+        "1. Synthesis: Answer fluidly. Never expose your internal mechanics by saying 'According to the context provided'.\n"
+        "2. Knowledge: Answer general knowledge questions confidently. Use retrieved context only when it specifically addresses the user's prompt.\n"
+        "3. Citations: When utilizing factual data from retrieved context, strictly use inline citations (e.g., [https://example.com/page]).\n"
+        "4. Clarity: Keep answers concise but comprehensive. Break complex ideas into digestible points."
+    )
+    
+    st.session_state.chat_engine = st.session_state.index.as_chat_engine(
+        chat_mode="condense_plus_context",
+        system_prompt=system_prompt,
+        similarity_top_k=3,
+        node_postprocessors=[SimilarityPostprocessor(similarity_cutoff=0.5)],
+        verbose=True
+    )
+
+
+def load_engine_from_storage():
+    """Loads a pre-computed index from disk and initializes the chat engine."""
+    storage_context = StorageContext.from_defaults(persist_dir="./storage")
+    st.session_state.index = load_index_from_storage(storage_context)
+    
+    system_prompt = (
+        "You are a highly capable AI assistant, designed to be helpful, harmless, and honest. "
+        "You provide structured, highly readable answers using Markdown formatting (bolding, lists, etc.).\n\n"
+        "CORE DIRECTIVES:\n"
+        "1. Synthesis: Answer fluidly. Never expose your internal mechanics by saying 'According to the context provided'.\n"
+        "2. Knowledge: Answer general knowledge questions confidently. Use retrieved context only when it specifically addresses the user's prompt.\n"
+        "3. Citations: When utilizing factual data from retrieved context, strictly use inline citations (e.g., [https://example.com/page]).\n"
+        "4. Clarity: Keep answers concise but comprehensive. Break complex ideas into digestible points."
     )
     
     st.session_state.chat_engine = st.session_state.index.as_chat_engine(
@@ -94,15 +124,29 @@ def initialize_engine(docs):
 
 def intent_agent(query: str):
     """Intent agent: decides whether external indexed sources are needed."""
+    
+    history_messages = st.session_state.get("messages", [])
+    recent_history = history_messages[-4:] 
+    conversation_lines = []
+    for msg in recent_history:
+        role = msg.get("role", "user").capitalize()
+        content = (msg.get("content") or "").strip()
+        if content:
+            if role == "Assistant" and len(content) > 200:
+                content = content[:200] + "..."
+            conversation_lines.append(f"{role}: {content}")
+    conversation_context = "\n".join(conversation_lines)
+
     router_prompt = (
-        "You are a routing classifier for a chatbot with optional web-index tools. "
-        "Return exactly one label: NEEDS_SOURCES or NO_SOURCES.\n\n"
-        "Choose NEEDS_SOURCES only if the user likely needs facts from specific websites "
-        "(business details, pages, offerings, events, policies, location-specific details).\n"
-        "Choose NO_SOURCES for greetings, opinions, creative tasks, coding help, math, language tasks, "
-        "or broad general-knowledge questions.\n\n"
-        f"User query: {query}\n"
-        "Label:"
+        "You are a strict routing classifier for an AI assistant. Your job is to decide if the user's latest query requires searching a specific website index for facts.\n\n"
+        "RULES:\n"
+        "1. Output ONLY the exact word 'NEEDS_SOURCES' or 'NO_SOURCES'. Do not explain your reasoning.\n"
+        "2. Output 'NEEDS_SOURCES' if the user is asking about specific business details, products, services, events, documentation, or anything that requires up-to-date, domain-specific facts.\n"
+        "3. Output 'NO_SOURCES' for general knowledge, coding help, math, creative writing, greetings, or casual conversation.\n\n"
+        "CONVERSATION CONTEXT:\n"
+        f"{conversation_context if conversation_context else '(No prior context)'}\n\n"
+        f"LATEST USER QUERY: {query}\n\n"
+        "LABEL:"
     )
 
     try:
@@ -166,7 +210,6 @@ def response_agent(prompt: str, rag_result: dict):
     """Response agent: generates the final user answer, with or without source context."""
     response_placeholder = st.empty()
     full_response = ""
-    response_placeholder.markdown("_Thinking…_")
 
     history_messages = st.session_state.get("messages", [])
     recent_history = history_messages[-8:]
@@ -191,23 +234,35 @@ def response_agent(prompt: str, rag_result: dict):
                 urls.append(src)
 
         blended_prompt = (
-            "You are a helpful chatbot. Answer naturally and conversationally.\n"
-            "Use the optional website snippets as supporting evidence when relevant, but do not over-focus on them.\n"
-            "If this is a recommendation query, provide several alternatives naturally (ideally 3-6 when possible), "
-            "and do not steer to only one venue unless the user explicitly asks for one."
-            "When you use website-derived facts, add inline URL citations like [https://...].\n"
-            "If the snippets are only partially relevant, combine with general knowledge and clearly separate uncertain claims.\n\n"
-            "Conversation history from the current session:\n"
+            "You are a helpful, intelligent, and highly capable AI assistant. Your goal is to provide clear, accurate, and comprehensive answers.\n\n"
+            "INSTRUCTIONS:\n"
+            "- Answer directly and conversationally. DO NOT say things like 'Based on the provided snippets' or 'The sources say'. Synthesize the information naturally as if it were your own knowledge.\n"
+            "- Use formatting extensively to make your answer easy to read. Use **bold text** for emphasis, bullet points for lists, and brief paragraphs.\n"
+            "- If the query asks for recommendations or ideas, provide a well-structured list with 3-6 distinct, varied options.\n"
+            "- When you state a specific fact, figure, or claim derived from the website snippets, immediately follow it with an inline citation like [https://...].\n"
+            "- If the snippets do not contain the complete answer, seamlessly blend them with your general knowledge, but clearly distinguish facts from general advice.\n\n"
+            "CONVERSATION HISTORY:\n"
             f"{conversation_context if conversation_context else '(no prior turns)'}\n\n"
-            f"Latest user query:\n{prompt}\n\n"
-            "Website snippets (optional evidence):\n"
-            + "\n\n".join(context_lines)
+            "WEBSITE CONTEXT (Supporting Evidence):\n"
+            f"{chr(10).join(context_lines)}\n\n"
+            f"USER QUERY: {prompt}\n\n"
+            "ASSISTANT RESPONSE:"
         )
 
-        with st.spinner("Thinking..."):
-            streaming_response = Settings.llm.stream_complete(blended_prompt)
+        streaming_response = Settings.llm.stream_complete(blended_prompt)
+        response_iterator = iter(streaming_response)
 
-        for chunk in streaming_response:
+        with st.spinner("Thinking..."):
+            try:
+                first_chunk = next(response_iterator)
+            except StopIteration:
+                first_chunk = None
+
+        if first_chunk:
+            full_response += getattr(first_chunk, "delta", "")
+            response_placeholder.markdown(full_response)
+
+        for chunk in response_iterator:
             full_response += getattr(chunk, "delta", "")
             response_placeholder.markdown(full_response)
 
@@ -223,22 +278,36 @@ def response_agent(prompt: str, rag_result: dict):
             "source_nodes": source_nodes,
         }
 
-    with st.spinner("Thinking..."):
-        fallback_prompt = (
-            "You are a helpful chatbot. Use the conversation history to maintain context within this session.\n"
-            "Do not mention internal memory rules. Answer naturally.\n\n"
-            "Conversation history from the current session:\n"
-            f"{conversation_context if conversation_context else '(no prior turns)'}\n\n"
-            f"Latest user query:\n{prompt}\n"
-        )
-        fallback_response_stream = Settings.llm.stream_complete(fallback_prompt)
+    fallback_prompt = (
+        "You are a helpful, intelligent, and highly capable AI assistant. Answer the user's question thoughtfully and accurately.\n\n"
+        "INSTRUCTIONS:\n"
+        "- Maintain a polite, objective, and conversational tone.\n"
+        "- Structure your response for readability. Use **Markdown formatting**, including bolding for key terms, bullet points for lists, and clear paragraph breaks.\n"
+        "- Rely on the conversation history to understand the context of this specific turn.\n\n"
+        "CONVERSATION HISTORY:\n"
+        f"{conversation_context if conversation_context else '(no prior turns)'}\n\n"
+        f"USER QUERY: {prompt}\n\n"
+        "ASSISTANT RESPONSE:"
+    )
+    fallback_response_stream = Settings.llm.stream_complete(fallback_prompt)
+    fallback_iterator = iter(fallback_response_stream)
 
-    for chunk in fallback_response_stream:
+    with st.spinner("Thinking..."):
+        try:
+            first_chunk = next(fallback_iterator)
+        except StopIteration:
+            first_chunk = None
+
+    if first_chunk:
+        delta = getattr(first_chunk, "delta", "")
+        full_response += delta
+        response_placeholder.markdown(full_response)
+
+    for chunk in fallback_iterator:
         delta = getattr(chunk, "delta", "")
         full_response += delta
         response_placeholder.markdown(full_response)
 
-    response_placeholder.markdown(full_response)
     return {
         "content": full_response,
         "mode": "base",
@@ -271,9 +340,13 @@ async def run_crawl_and_index(urls):
 
 
 if "engine_initialized" not in st.session_state:
-    initial_docs = load_data_folder()
-    if initial_docs:
-        initialize_engine(initial_docs)
+    if os.path.exists("./storage"):
+        load_engine_from_storage()
+    else:
+        initial_docs = load_data_folder()
+        if initial_docs:
+            initialize_engine(initial_docs)
+            
     st.session_state.engine_initialized = True
 
 with st.sidebar:
@@ -295,11 +368,15 @@ with st.sidebar:
                 urls = [u for u in urls if not u.endswith(('.jpg', '.png', '.pdf'))]
                 
                 if urls:
+                    if os.path.exists("./storage"):
+                        st.write("Clearing old index from storage...")
+                        shutil.rmtree("./storage")
+                        
                     st.write(f"Crawling {len(urls)} actual web pages...")
                     docs = asyncio.run(run_crawl_and_index(urls))
                     
                     st.write("Generating Vector Embeddings...")
-                    initialize_engine(docs)
+                    initialize_engine(docs) 
                     
                     status.update(label="Search Engine Ready!", state="complete")
                     st.success(f"Indexed {len(docs)} total pages successfully.")
@@ -307,9 +384,6 @@ with st.sidebar:
                     st.warning("No valid URLs found.")
         else:
             st.error("Please provide a sitemap URL.")
-
-    st.divider()
-    developer_mode = st.toggle("Developer mode", value=False, key="developer_mode")
 
 st.title("What can I help with?")
 
@@ -332,31 +406,32 @@ if prompt := st.chat_input("Ask anything..."):
         rag_result = rag_agent(prompt, intent_result)
         agent_result = response_agent(prompt, rag_result)
 
-        if developer_mode and agent_result["mode"] == "rag" and agent_result["source_nodes"]:
+        if agent_result["mode"] == "rag" and agent_result["source_nodes"]:
             with st.expander("Retrieved sources"):
-                st.write("These are the pages that were the most relevant to the query.")
-                unique_sources = set()
-                for node in agent_result["source_nodes"]:
-                    src = node.node.metadata.get("source")
+                st.write("These are the text chunks that were the most relevant to the query.")
+                
+                for i, node in enumerate(agent_result["source_nodes"], start=1):
+                    src = node.node.metadata.get("source", "Unknown source")
                     score = node.score if node.score else 0.0
-                    if src:
-                        unique_sources.add((src, score))
-                for src, score in sorted(unique_sources, key=lambda x: x[1], reverse=True):
-                    st.write(f"- [{src}]({src}) *(Cosine similarity: {score:.2f})*")
+                    chunk_text = node.node.get_content().strip()
+                    
+                    st.markdown(f"**{i}. [{src}]({src})** *(Cosine similarity: {score:.2f})*")
+                    
+                    st.info(chunk_text)
+                    st.divider()
 
-        if developer_mode:
-            if agent_result["mode"] == "rag":
+        if agent_result["mode"] == "rag":
+            st.caption(
+                "Pipeline: intent_agent ➜ rag_agent ➜ response_agent | "
+                f"used indexed sources ({rag_result['reason']}; best={rag_result['best_score']:.2f}, second={rag_result['second_score']:.2f})."
+            )
+        else:
+            if rag_result["reason"] == "no_index_loaded":
+                st.info("💡 Note: No sitemap has been indexed yet. I am answering using only my base knowledge.")
+            else:
                 st.caption(
                     "Pipeline: intent_agent ➜ rag_agent ➜ response_agent | "
-                    f"used indexed sources ({rag_result['reason']}; best={rag_result['best_score']:.2f}, second={rag_result['second_score']:.2f})."
+                    f"answered normally ({rag_result['reason']}; best={rag_result['best_score']:.2f}, second={rag_result['second_score']:.2f})."
                 )
-            else:
-                if rag_result["reason"] == "no_index_loaded":
-                    st.info("💡 Note: No sitemap has been indexed yet. I am answering using only my base knowledge.")
-                else:
-                    st.caption(
-                        "Pipeline: intent_agent ➜ rag_agent ➜ response_agent | "
-                        f"answered normally ({rag_result['reason']}; best={rag_result['best_score']:.2f}, second={rag_result['second_score']:.2f})."
-                    )
 
         st.session_state.messages.append({"role": "assistant", "content": agent_result["content"]})
