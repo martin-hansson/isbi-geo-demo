@@ -20,6 +20,8 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from crawl4ai import AsyncWebCrawler
 
 st.set_page_config(page_title="FakeGPT", layout="wide")
+
+# You can set the model you want to use. If Ollama is run locally, leave base_url blank.
 Settings.llm = Ollama(model="gemini-3-flash-preview", base_url="https://ollama-haproxy.dsv.su.se/", request_timeout=300.0)
 Settings.embed_model = HuggingFaceEmbedding(model_name="BAAI/bge-small-en-v1.5")
 
@@ -27,15 +29,19 @@ if not os.path.exists("./data"):
     os.makedirs("./data")
 
 
+# TODO: Make sure that it can handle recursive crawling without a sitemap.
 def get_urls_from_sitemap(sitemap_url):
     """Recursively parses XML sitemaps and sitemap indexes for URLs."""
     try:
         response = requests.get(sitemap_url)
+
+        # Build element tree from XML sitemap content, handling namespaces if present.
         root = ET.fromstring(response.content)
         match = re.match(r'\{.*\}', root.tag)
         namespace = {'ns': match.group(0)[1:-1]} if match else {}
         ns_prefix = 'ns:' if namespace else ''
 
+        # Populate urls list from the sitemap.
         urls = []
         if 'sitemapindex' in root.tag:
             for loc in root.findall(f'.//{ns_prefix}loc', namespace):
@@ -45,6 +51,7 @@ def get_urls_from_sitemap(sitemap_url):
             for loc in root.findall(f'.//{ns_prefix}loc', namespace):
                 if loc.text:
                     urls.append(loc.text)
+
         return urls
     except Exception as e:
         st.error(f"Error parsing sitemap {sitemap_url}: {e}")
@@ -63,6 +70,7 @@ def load_data_folder():
                     first_line = content.split('\n')[0]
                     url = first_line.replace("<!-- URL: ", "").replace(" -->", "").strip() if first_line.startswith("<!-- URL:") else "Local File"
                     
+                    # Appends a document node with source URL metadata for citations.
                     docs.append(Document(
                         text=content,
                         metadata={"source": url, "title": filename}
@@ -72,59 +80,26 @@ def load_data_folder():
 
 def initialize_engine(docs):
     """Builds the vector index, saves it to disk, and initializes the chat engine."""
-    
+
+    # Parses markdown documents into chunks and builds a vector index, then saves it to disk for future sessions.
+    # This is a simpler parser, so it could include images and other non-text content in the chunks.
     parser = MarkdownNodeParser()
     nodes = parser.get_nodes_from_documents(docs)
     st.session_state.index = VectorStoreIndex(nodes)
     
     st.session_state.index.storage_context.persist(persist_dir="./storage")
-    
-    system_prompt = (
-        "You are a highly capable AI assistant, designed to be helpful, harmless, and honest. "
-        "You provide structured, highly readable answers using Markdown formatting (bolding, lists, etc.).\n\n"
-        "CORE DIRECTIVES:\n"
-        "1. Synthesis: Answer fluidly. Never expose your internal mechanics by saying 'According to the context provided'.\n"
-        "2. Knowledge: Answer general knowledge questions confidently. Use retrieved context only when it specifically addresses the user's prompt.\n"
-        "3. Citations: When utilizing factual data from retrieved context, strictly use inline citations (e.g., [https://example.com/page]).\n"
-        "4. Clarity: Keep answers concise but comprehensive. Break complex ideas into digestible points."
-    )
-    
-    st.session_state.chat_engine = st.session_state.index.as_chat_engine(
-        chat_mode="condense_plus_context",
-        system_prompt=system_prompt,
-        similarity_top_k=3,
-        node_postprocessors=[SimilarityPostprocessor(similarity_cutoff=0.5)],
-        verbose=True
-    )
 
 
 def load_engine_from_storage():
     """Loads a pre-computed index from disk and initializes the chat engine."""
     storage_context = StorageContext.from_defaults(persist_dir="./storage")
     st.session_state.index = load_index_from_storage(storage_context)
-    
-    system_prompt = (
-        "You are a highly capable AI assistant, designed to be helpful, harmless, and honest. "
-        "You provide structured, highly readable answers using Markdown formatting (bolding, lists, etc.).\n\n"
-        "CORE DIRECTIVES:\n"
-        "1. Synthesis: Answer fluidly. Never expose your internal mechanics by saying 'According to the context provided'.\n"
-        "2. Knowledge: Answer general knowledge questions confidently. Use retrieved context only when it specifically addresses the user's prompt.\n"
-        "3. Citations: When utilizing factual data from retrieved context, strictly use inline citations (e.g., [https://example.com/page]).\n"
-        "4. Clarity: Keep answers concise but comprehensive. Break complex ideas into digestible points."
-    )
-    
-    st.session_state.chat_engine = st.session_state.index.as_chat_engine(
-        chat_mode="condense_plus_context",
-        system_prompt=system_prompt,
-        similarity_top_k=3,
-        node_postprocessors=[SimilarityPostprocessor(similarity_cutoff=0.5)],
-        verbose=True
-    )
 
 
 def intent_agent(query: str):
     """Intent agent: decides whether external indexed sources are needed."""
     
+    # Append the last 4 converstation turns to help intent agent decide if sources are needed.
     history_messages = st.session_state.get("messages", [])
     recent_history = history_messages[-4:] 
     conversation_lines = []
@@ -137,6 +112,7 @@ def intent_agent(query: str):
             conversation_lines.append(f"{role}: {content}")
     conversation_context = "\n".join(conversation_lines)
 
+    # Instruction prompt for intent classification. The LLM must decide if the query requires sources.
     router_prompt = (
         "You are a strict routing classifier for an AI assistant. Your job is to decide if the user's latest query requires searching a specific website index for facts.\n\n"
         "RULES:\n"
@@ -181,8 +157,13 @@ def rag_agent(
             "source_nodes": [],
         }
 
+    # Change similarity_top_k to adjust how many sources are retrieved.
+    # Change similarity_cutoff to adjust minimum cosine similarity threshold.
     retriever = st.session_state.index.as_retriever(similarity_top_k=3)
     nodes = retriever.retrieve(query)
+    processor = SimilarityPostprocessor(similarity_cutoff=0.7)
+    nodes = processor.postprocess_nodes(nodes)
+
     if not nodes:
         return {
             "use_sources": False,
@@ -192,8 +173,8 @@ def rag_agent(
             "source_nodes": [],
         }
 
+    # Sorts retrieved nodes by their cosine similarity.
     scored_nodes = sorted(nodes, key=lambda n: n.score or 0.0, reverse=True)
-    selected_nodes = scored_nodes[:3]
     best_score = scored_nodes[0].score or 0.0
     second_score = scored_nodes[1].score or 0.0 if len(scored_nodes) > 1 else 0.0
 
@@ -202,7 +183,7 @@ def rag_agent(
         "reason": "relevance_confident",
         "best_score": best_score,
         "second_score": second_score,
-        "source_nodes": selected_nodes,
+        "source_nodes": scored_nodes,
     }
 
 
@@ -211,6 +192,7 @@ def response_agent(prompt: str, rag_result: dict):
     response_placeholder = st.empty()
     full_response = ""
 
+    # Adds conversation history to the prompt for better context.
     history_messages = st.session_state.get("messages", [])
     recent_history = history_messages[-8:]
     conversation_lines = []
@@ -221,6 +203,7 @@ def response_agent(prompt: str, rag_result: dict):
             conversation_lines.append(f"{role}: {content}")
     conversation_context = "\n".join(conversation_lines)
 
+    # If we use sources, we want to include the retrieved chunks in the instruction prompt.
     if rag_result.get("use_sources", False):
         source_nodes = rag_result.get("source_nodes", [])
         context_lines = []
@@ -233,14 +216,14 @@ def response_agent(prompt: str, rag_result: dict):
             if src and src not in urls:
                 urls.append(src)
 
+        # Instruction prompt with retrieved context, conversation history and user query.
         blended_prompt = (
-            "You are a helpful, intelligent, and highly capable AI assistant. Your goal is to provide clear, accurate, and comprehensive answers.\n\n"
-            "INSTRUCTIONS:\n"
-            "- Answer directly and conversationally. DO NOT say things like 'Based on the provided snippets' or 'The sources say'. Synthesize the information naturally as if it were your own knowledge.\n"
-            "- Use formatting extensively to make your answer easy to read. Use **bold text** for emphasis, bullet points for lists, and brief paragraphs.\n"
-            "- If the query asks for recommendations or ideas, provide a well-structured list with 3-6 distinct, varied options.\n"
-            "- When you state a specific fact, figure, or claim derived from the website snippets, immediately follow it with an inline citation like [https://...].\n"
-            "- If the snippets do not contain the complete answer, seamlessly blend them with your general knowledge, but clearly distinguish facts from general advice.\n\n"
+            "You are a highly capable, helpful, and honest AI assistant. Your goal is to provide clear, accurate, and comprehensive answers.\n\n"
+            "CORE DIRECTIVES:\n"
+            "1. Synthesis: Answer fluidly and conversationally. NEVER expose your internal mechanics. Do not say things like 'Based on the provided snippets', 'According to the context', or 'The sources say'. Synthesize the information naturally as if it were your own knowledge.\n"
+            "2. Citations: When stating a specific fact, figure, or claim derived from the provided website context, strictly use an inline citation immediately after the claim (e.g., [https://example.com/page]).\n"
+            "3. Formatting: Structure your response for maximum readability. Use **bold text** for emphasis, bullet points for lists, and brief paragraphs.\n"
+            "4. Knowledge Blending: If the provided context does not contain the complete answer, seamlessly blend it with your general knowledge, but clearly distinguish hard facts from general advice.\n\n"
             "CONVERSATION HISTORY:\n"
             f"{conversation_context if conversation_context else '(no prior turns)'}\n\n"
             "WEBSITE CONTEXT (Supporting Evidence):\n"
@@ -249,6 +232,7 @@ def response_agent(prompt: str, rag_result: dict):
             "ASSISTANT RESPONSE:"
         )
 
+        # Stream the response from the LLM, updating the answer in real-time as chunks arrive.
         streaming_response = Settings.llm.stream_complete(blended_prompt)
         response_iterator = iter(streaming_response)
 
@@ -278,12 +262,14 @@ def response_agent(prompt: str, rag_result: dict):
             "source_nodes": source_nodes,
         }
 
+    # If we do not use sources, we generate the response with only the conversation history and user query.
     fallback_prompt = (
-        "You are a helpful, intelligent, and highly capable AI assistant. Answer the user's question thoughtfully and accurately.\n\n"
-        "INSTRUCTIONS:\n"
-        "- Maintain a polite, objective, and conversational tone.\n"
-        "- Structure your response for readability. Use **Markdown formatting**, including bolding for key terms, bullet points for lists, and clear paragraph breaks.\n"
-        "- Rely on the conversation history to understand the context of this specific turn.\n\n"
+        "You are a highly capable, helpful, and honest AI assistant. Answer the user's question thoughtfully and accurately based on your general knowledge.\n\n"
+        "CORE DIRECTIVES:\n"
+        "1. Tone: Maintain a polite, objective, and conversational tone.\n"
+        "2. Clarity: Keep answers concise but comprehensive. Break complex ideas into digestible points.\n"
+        "3. Formatting: Structure your response for maximum readability. Use **Markdown formatting** extensively, including bolding for key terms, bullet points for lists, and clear paragraph breaks.\n"
+        "4. Context: Rely on the conversation history to understand the exact context and intent of the user's latest query.\n\n"
         "CONVERSATION HISTORY:\n"
         f"{conversation_context if conversation_context else '(no prior turns)'}\n\n"
         f"USER QUERY: {prompt}\n\n"
@@ -406,6 +392,7 @@ if prompt := st.chat_input("Ask anything..."):
         rag_result = rag_agent(prompt, intent_result)
         agent_result = response_agent(prompt, rag_result)
 
+        # This is where we include the retrieved sources in the UI.
         if agent_result["mode"] == "rag" and agent_result["source_nodes"]:
             with st.expander("Retrieved sources"):
                 st.write("These are the text chunks that were the most relevant to the query.")

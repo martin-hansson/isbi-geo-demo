@@ -1,4 +1,5 @@
-demo.csv
 data/
 .vscode/
 storage/
+isbi-demo/
+.DS_Store
