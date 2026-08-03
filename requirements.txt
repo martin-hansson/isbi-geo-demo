@@ -5,3 +5,5 @@ llama-index-llms-ollama
 llama-index-embeddings-huggingface
 crawl4ai
 watchdog
+torch
+duckduckgo-search
