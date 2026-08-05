@@ -1,9 +1,0 @@
-streamlit
-requests
-llama-index-core
-llama-index-llms-ollama
-llama-index-embeddings-huggingface
-crawl4ai
-watchdog
-torch
-duckduckgo-search

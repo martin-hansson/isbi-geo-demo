@@ -1,59 +1,63 @@
-# FakeGPT: A RAG-Powered Chatbot Demo
+# Generative Engine Optimization (GEO) Lab
 
-FakeGPT is a Streamlit-based web application that demonstrates a simple implementation of a Retrieval-Augmented Generation (RAG) chatbot. It allows you to input an XML sitemap URL, crawls the website's content, and builds a local vector index. The chatbot then uses this index to answer user queries with domain-specific facts, falling back to general knowledge when necessary.
-
-It utilizes **LlamaIndex** for RAG orchestration, **Crawl4AI** for asynchronous web scraping, **HuggingFace** for embeddings, and **Ollama** for the LLM.
-
-> [!NOTE]
-> This demo doesn't use the internal logic for the chat engine, thus it doesn't rewrite queries for better context. We simulate a RAG engine for clarity with three "agents". This allows us to demonstrate each decision in the pipeline for transparency. The agents are:
->
-> 1. Intent agent that decides if the user query and last conversation history requires additional sources.
-> 2. A RAG agent that retrieves context based on the intent classification and cosine similarity.
-> 3. A response agent that uses the conversation history, eventual retrieved context and query to return a response.
+Welcome to the GEO Lab! In this lab, you will explore how Large Language Models (LLMs), Agentic Search Loops, and Retrieval-Augmented Generation (RAG) combine to simulate how modern AI search engines work.
 
 ## Prerequisites
 
-- Python 3.8 or higher.
-- An accessible Ollama instance. _Note: If you have a local Ollama instance, don't forget to_ `Ollama pull <model_name>`.
+Before starting the lab, you must install the following dependencies on your machine:
 
-## Setup Instructions
+### 1. Install Node.js
+You must have Node.js (version 18 or higher) installed.
+- **Mac/Windows:** Download and install from the [official Node.js website](https://nodejs.org/).
+- **Linux:** We recommend using nvm (Node Version Manager) or your package manager:
+  ```bash
+  curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.7/install.sh | bash
+  nvm install 20
+  ```
 
-Follow these steps to set up the project locally.
+### 2. Install Ollama (Local AI Engine)
+This lab uses local LLMs to process data securely and for free.
+- **Mac:** Download the Mac installer from [Ollama's website](https://ollama.com/).
+- **Windows:** Download the Windows preview installer from Ollama.
+- **Linux:** Run the automated install script:
+  ```bash
+  curl -fsSL https://ollama.com/install.sh | sh
+  ```
 
-1. **Create a Virtual Environment**
+### 3. Download the Required AI Models
+Once Ollama is installed and running, open your terminal (or Command Prompt) and pull the specific models required for this lab:
 
-It is highly recommended to use a virtual environment to manage dependencies. Open your terminal in the project directory and run:
+```bash
+# 1. Download the generative chatbot model (Llama 3.2 3B)
+ollama pull llama3.2:3b
 
-```
-python -m venv isbi-demo
-```
-
-2. **Activate the Virtual Environment**
-
-```
-source isbi-demo/bin/activate
-```
-
-3. **Install Dependencies**
-
-With the virtual environment activated, install the required Python packages using the provided requirements.txt file:
-
-```
-pip install -r requirements.txt
-```
-
-4. **Run the Application**
-
-Once the packages are installed, you can start the Streamlit application by running:
-
-```
-streamlit run fakegpt.py
+# 2. Download the vector embedding model (Gemma)
+ollama pull embeddinggemma
 ```
 
-This will start a local server, and your default web browser should automatically open to the app (usually at http://localhost:8501).
+*(Note: Depending on your internet connection, downloading the models may take a few minutes as they are several gigabytes in size).*
 
-### Usage
+---
 
-1. **Rebuild Index:** In the sidebar, enter the URL of a valid XML sitemap (e.g., `https://example.com/sitemap.xml`) and click **Rebuild Index**. The app will crawl the pages, generate vector embeddings, and save the data locally to a `./storage` directory.
+## Running the Lab
 
-2. **Chat:** Use the main chat interface to ask questions. If the question requires specific knowledge from your indexed website, the chatbot will retrieve the relevant text chunks, synthesize an answer, and provide source links.
+Once all prerequisites are installed, you can start the lab application. 
+
+1. **Open your terminal** and navigate to this project folder.
+2. **Install project dependencies:**
+   ```bash
+   npm install
+   ```
+3. **Start the development server:**
+   ```bash
+   npm run dev
+   ```
+4. **Open your browser** and navigate to the URL provided in the terminal (usually `http://localhost:5173`).
+
+---
+
+## Troubleshooting
+
+- **Server Crash / ECONNREFUSED:** Ensure Ollama is running in the background. If the Node.js server crashes, simply restart it by pressing `Ctrl+C` and running `npm run dev` again.
+- **Crawler 403 Errors:** If you see 403 Forbidden errors in the terminal, it means the website's firewall (like Cloudflare) blocked the automated web crawler. This is normal when scraping the live web. The LLM will fall back to other successful pages.
+- **Empty Local Index:** If your local cosine similarity scores are extremely low, ensure you have generated your `local_index.json` using the correct `embeddinggemma` model.
